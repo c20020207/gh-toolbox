@@ -34,7 +34,7 @@ struct ContentView: View {
                         if store.requested.isEmpty {
                             Text("Nothing waiting on you").foregroundStyle(.secondary)
                         }
-                        ForEach(store.requested) { PRRow(pr: $0) }
+                        ForEach(store.requested) { PRRow(pr: $0, review: store.reviews[$0.reviewKey]) }
                     }
                     Section("My PRs") {
                         ForEach(store.mine) { PRRow(pr: $0) }
@@ -92,17 +92,27 @@ struct CIDot: View {
 
 struct PRRow: View {
     let pr: PR
+    var review: ReviewState?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             CIDot(state: pr.ciState)
             VStack(alignment: .leading, spacing: 2) {
                 Text(pr.title).lineLimit(2)
-                Text("\(pr.repoName)#\(String(pr.number)) · \(pr.authorLogin)")
+                (Text("\(pr.repoName)#\(String(pr.number)) · \(pr.authorLogin) · opened ")
+                    + Text(pr.createdAt, format: .relative(presentation: .named)))
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
             if pr.isDraft { Tag(text: "Draft", color: .gray) }
+            switch review {
+            case .queued: Image(systemName: "clock").foregroundStyle(.secondary)
+            case .running: ProgressView().controlSize(.mini)
+            case .done(let r) where r.verdict == "ok": Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+            case .done(let r): Tag(text: "\(r.items.count) to check", color: .orange)
+            case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+            case nil: EmptyView()
+            }
         }
         .padding(.vertical, 2)
     }
@@ -130,7 +140,10 @@ struct PRDetail: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(pr.title).font(.title3.bold()).textSelection(.enabled)
             HStack(spacing: 6) {
-                Text("\(pr.repository.nameWithOwner)#\(String(pr.number)) by \(pr.authorLogin)").foregroundStyle(.secondary)
+                (Text("\(pr.repository.nameWithOwner)#\(String(pr.number)) by \(pr.authorLogin), opened ")
+                    + Text(pr.createdAt, format: .relative(presentation: .named))
+                    + Text(" (\(pr.createdAt.formatted(date: .abbreviated, time: .omitted)))"))
+                    .foregroundStyle(.secondary)
                 if pr.isDraft { Tag(text: "Draft", color: .gray) }
                 switch pr.reviewDecision {
                 case "APPROVED": Tag(text: "Approved", color: .green)
@@ -140,6 +153,7 @@ struct PRDetail: View {
             }
             checks
             actions
+            if !isMine { codexReview }
             Divider()
             HTMLView(key: pr.id, html: pr.bodyHTML)
         }
@@ -179,6 +193,7 @@ struct PRDetail: View {
                 Button(pr.isDraft ? "Ready for review" : "Convert to draft") {
                     perform(["pr", "ready", pr.url.absoluteString] + (pr.isDraft ? [] : ["--undo"]))
                 }
+                Button("Close PR", role: .destructive) { perform(["pr", "close", pr.url.absoluteString]) }
             } else {
                 Button("Approve") { perform(["pr", "review", pr.url.absoluteString, "--approve"]) }
                     .buttonStyle(.borderedProminent)
@@ -186,6 +201,56 @@ struct PRDetail: View {
             if working { ProgressView().controlSize(.small) }
         }
         .disabled(working)
+    }
+
+    @ViewBuilder
+    private var codexReview: some View {
+        let state = store.reviews[pr.reviewKey]
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                switch state {
+                case .queued, nil:
+                    Image(systemName: "clock").foregroundStyle(.secondary)
+                    Text("Codex review queued")
+                case .running:
+                    ProgressView().controlSize(.small)
+                    Text("Codex is reviewing, usually a few minutes")
+                case .done(let r) where r.verdict == "ok":
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                    Text("Codex found nothing that needs a closer look")
+                case .done(let r):
+                    Image(systemName: "exclamationmark.bubble.fill").foregroundStyle(.orange)
+                    Text("Codex flagged \(r.items.count) thing\(r.items.count == 1 ? "" : "s") to check")
+                case .failed(let message):
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                    Text("Review failed: \(message)").lineLimit(2)
+                }
+                Spacer()
+                switch state {
+                case .done, .failed:
+                    Button("Re-run") { store.rerunReview(pr) }.buttonStyle(.borderless).font(.caption)
+                default: EmptyView()
+                }
+            }
+            .font(.callout.weight(.medium))
+            if case .done(let r) = state {
+                Text(r.summary).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                ForEach(Array(r.items.enumerated()), id: \.offset) { _, item in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Link("\(item.file):\(String(item.line))", destination: blobURL(item))
+                            .font(.caption.monospaced())
+                        Text(item.why).font(.callout).textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func blobURL(_ item: Review.Item) -> URL {
+        URL(string: "https://github.com/\(pr.repository.nameWithOwner)/blob/\(pr.headRefOid)/\(item.file.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? item.file)#L\(item.line)")!
     }
 
     private func perform(_ args: [String]) {

@@ -7,6 +7,9 @@ struct PR: Decodable, Identifiable {
     let title: String
     let url: URL
     let isDraft: Bool
+    let createdAt: Date
+    let headRefOid: String
+    let baseRefName: String
     let reviewDecision: String?
     let bodyHTML: String
     let author: Login?
@@ -24,6 +27,7 @@ struct PR: Decodable, Identifiable {
     var authorLogin: String { author?.login ?? "ghost" }
     var repoName: String { repository.nameWithOwner.split(separator: "/").last.map(String.init) ?? "" }
     var ciState: String? { commits.nodes.first?.commit.statusCheckRollup?.state }
+    var reviewKey: String { "\(id)@\(headRefOid)" }
     var checks: [Check] { commits.nodes.first?.commit.statusCheckRollup?.contexts.nodes ?? [] }
 }
 
@@ -52,7 +56,7 @@ query {
   dismissed: search(query: "is:open is:pr reviewed-by:@me review:required -author:@me archived:false sort:updated-desc", type: ISSUE, first: 50) { nodes { ...pr } }
 }
 fragment pr on PullRequest {
-  id number title url isDraft reviewDecision bodyHTML
+  id number title url isDraft createdAt headRefOid baseRefName reviewDecision bodyHTML
   author { login }
   repository { nameWithOwner }
   commits(last: 1) { nodes { commit { statusCheckRollup { state
@@ -73,13 +77,13 @@ struct GHError: LocalizedError {
     let errorDescription: String?
 }
 
-/// Runs `gh` off the main thread. A GUI app doesn't get the login shell's PATH, so Homebrew's bin is added.
-func gh(_ args: [String]) async throws -> Data {
+/// Runs a CLI off the main thread. A GUI app doesn't get the login shell's PATH, so Homebrew's bin is added.
+func cli(_ args: [String]) async throws -> Data {
     try await withCheckedThrowingContinuation { cont in
         DispatchQueue.global().async {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            p.arguments = ["gh"] + args
+            p.arguments = args
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
             p.environment = env
@@ -87,15 +91,24 @@ func gh(_ args: [String]) async throws -> Data {
             p.standardOutput = out
             p.standardError = err
             do { try p.run() } catch { return cont.resume(throwing: error) }
-            // Drain before waiting: a body-heavy response overflows the pipe buffer and would deadlock.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 20 * 60) { if p.isRunning { p.terminate() } }
+            // Drain both pipes concurrently before waiting: either one filling its buffer (gh's big
+            // responses, codex's stderr progress log) blocks the child and deadlocks us.
+            var errData = Data()
+            let errDone = DispatchGroup()
+            errDone.enter()
+            DispatchQueue.global().async {
+                errData = err.fileHandleForReading.readDataToEndOfFile()
+                errDone.leave()
+            }
             let data = out.fileHandleForReading.readDataToEndOfFile()
-            let errData = err.fileHandleForReading.readDataToEndOfFile()
+            errDone.wait()
             p.waitUntilExit()
             if p.terminationStatus == 0 {
                 cont.resume(returning: data)
             } else {
-                let msg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                cont.resume(throwing: GHError(errorDescription: msg ?? "gh exited \(p.terminationStatus)"))
+                let msg = String(data: errData.suffix(600), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                cont.resume(throwing: GHError(errorDescription: msg ?? "\(args[0]) exited \(p.terminationStatus)"))
             }
         }
     }
@@ -107,8 +120,16 @@ final class Store {
     var requested: [PR] = []
     var error: String?
     var updatedAt: Date?
+    var reviews: [String: ReviewState] = [:]
+    private var reviewing = false
+    private let reviewsFile = appSupport.appendingPathComponent("reviews.json")
 
     init() {
+        try? FileManager.default.removeItem(at: workDir)
+        if let data = try? Data(contentsOf: reviewsFile),
+           let saved = try? JSONDecoder().decode([String: Review].self, from: data) {
+            reviews = saved.mapValues { .done($0) }
+        }
         Task {
             while true {
                 await refresh()
@@ -119,20 +140,49 @@ final class Store {
 
     func refresh() async {
         do {
-            let data = try await gh(["api", "graphql", "-f", "query=\(query)"])
-            let lists = try JSONDecoder().decode(Response.self, from: data).data
+            let data = try await cli(["gh", "api", "graphql", "-f", "query=\(query)"])
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let lists = try decoder.decode(Response.self, from: data).data
             mine = lists.mine.nodes
             var seen = Set<String>()
             requested = (lists.requested.nodes + lists.dismissed.nodes).filter { seen.insert($0.id).inserted }
             error = nil
             updatedAt = .now
+            for pr in requested where reviews[pr.reviewKey] == nil { reviews[pr.reviewKey] = .queued }
+            pumpReviews()
         } catch {
             self.error = error.localizedDescription
         }
     }
 
     func run(_ args: [String]) async {
-        do { _ = try await gh(args) } catch { self.error = error.localizedDescription }
+        do { _ = try await cli(["gh"] + args) } catch { self.error = error.localizedDescription }
         await refresh()
+    }
+
+    func rerunReview(_ pr: PR) {
+        reviews[pr.reviewKey] = .queued
+        pumpReviews()
+    }
+
+    /// One review at a time: each is a multi-minute Codex run over a full checkout.
+    private func pumpReviews() {
+        guard !reviewing, let pr = requested.first(where: {
+            if case .queued = reviews[$0.reviewKey] { true } else { false }
+        }) else { return }
+        reviewing = true
+        reviews[pr.reviewKey] = .running
+        Task {
+            do {
+                reviews[pr.reviewKey] = .done(try await codexReview(pr))
+                let done = reviews.compactMapValues { if case .done(let r) = $0 { r } else { nil } }
+                try? JSONEncoder().encode(done).write(to: reviewsFile)
+            } catch {
+                reviews[pr.reviewKey] = .failed(error.localizedDescription)
+            }
+            reviewing = false
+            pumpReviews()
+        }
     }
 }
