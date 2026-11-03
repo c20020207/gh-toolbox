@@ -37,7 +37,7 @@ struct ContentView: View {
                         ForEach(store.requested) { PRRow(pr: $0, review: store.reviews[$0.reviewKey]) }
                     }
                     Section("My PRs") {
-                        ForEach(store.mine) { PRRow(pr: $0) }
+                        ForEach(store.mine) { PRRow(pr: $0, mine: true) }
                     }
                 }
                 Divider()
@@ -98,13 +98,21 @@ struct CIDot: View {
 struct PRRow: View {
     let pr: PR
     var review: ReviewState?
+    var mine = false
+
+    /// On my own PRs the author is always me, so the slot shows who is reviewing instead.
+    private var who: Text {
+        guard mine else { return Text(pr.authorLogin) }
+        let names = pr.reviewers.map(\.name)
+        return names.isEmpty ? Text("no reviewer").foregroundStyle(.orange) : Text("→ " + names.joined(separator: ", "))
+    }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             CIDot(state: pr.ciState)
             VStack(alignment: .leading, spacing: 2) {
                 Text(pr.title).lineLimit(2)
-                (Text("\(pr.repoName)#\(String(pr.number)) · \(pr.authorLogin) · opened ")
+                (Text("\(pr.repoName)#\(String(pr.number)) · ") + who + Text(" · opened ")
                     + Text(pr.createdAt, format: .relative(presentation: .named)))
                     .font(.caption).foregroundStyle(.secondary)
             }
