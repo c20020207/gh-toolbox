@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 swift build -c release
-app=build/GHToolbox.app
+app="build/GitHub Toolbox.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp .build/release/GHToolbox "$app/Contents/MacOS/"
@@ -21,13 +21,14 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>GHToolbox</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleIdentifier</key><string>com.jimmy.ghtoolbox</string>
-  <key>CFBundleName</key><string>GH Toolbox</string>
+  <key>CFBundleName</key><string>GitHub Toolbox</string>
+  <key>CFBundleDisplayName</key><string>GitHub Toolbox</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
 </dict></plist>
 PLIST
 codesign -s - --force "$app"
-rm -rf /Applications/GHToolbox.app
+rm -rf "/Applications/GitHub Toolbox.app"
 cp -R "$app" /Applications/
-echo "installed /Applications/GHToolbox.app"
+echo "installed /Applications/GitHub Toolbox.app"
