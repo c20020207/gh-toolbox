@@ -4,6 +4,7 @@ struct Review: Codable {
     let verdict: String
     let summary: String
     let items: [Item]
+    var postedAt: Date?
 
     struct Item: Codable {
         let file: String

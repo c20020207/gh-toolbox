@@ -120,6 +120,7 @@ final class Store {
     var requested: [PR] = []
     var error: String?
     var updatedAt: Date?
+    var refreshing = false
     var reviews: [String: ReviewState] = [:]
     private var reviewing = false
     private let reviewsFile = appSupport.appendingPathComponent("reviews.json")
@@ -139,6 +140,8 @@ final class Store {
     }
 
     func refresh() async {
+        refreshing = true
+        defer { refreshing = false }
         do {
             let data = try await cli(["gh", "api", "graphql", "-f", "query=\(query)"])
             let decoder = JSONDecoder()
@@ -161,6 +164,49 @@ final class Store {
         await refresh()
     }
 
+    /// Submits the findings as a "changes requested" review. GitHub then drops the PR from the review-requested
+    /// list; when the author re-requests, the new head SHA gets a fresh Codex run.
+    func postFindings(_ pr: PR, _ review: Review) async {
+        let inline: [String: Any] = [
+            "commit_id": pr.headRefOid,
+            "event": "REQUEST_CHANGES",
+            "body": "Requesting changes, see the inline comments.",
+            "comments": review.items.map { ["path": $0.file, "line": $0.line, "side": "RIGHT", "body": $0.why] },
+        ]
+        let summary: [String: Any] = [
+            "commit_id": pr.headRefOid,
+            "event": "REQUEST_CHANGES",
+            "body": "Requesting changes:\n\n" + review.items.map { "- `\($0.file):\($0.line)` \($0.why)" }.joined(separator: "\n"),
+        ]
+        do {
+            do {
+                try await submitReview(pr, inline)
+            } catch where error.localizedDescription.contains("422") {
+                // A line outside the diff can't take an inline comment and GitHub rejects the whole review.
+                try await submitReview(pr, summary)
+            }
+            var posted = review
+            posted.postedAt = .now
+            reviews[pr.reviewKey] = .done(posted)
+            saveReviews()
+        } catch {
+            self.error = error.localizedDescription
+        }
+        await refresh()
+    }
+
+    private func submitReview(_ pr: PR, _ payload: [String: Any]) async throws {
+        let file = appSupport.appendingPathComponent("review-payload.json")
+        try JSONSerialization.data(withJSONObject: payload).write(to: file)
+        _ = try await cli(["gh", "api", "--method", "POST", "repos/\(pr.repository.nameWithOwner)/pulls/\(pr.number)/reviews",
+                           "--input", file.path])
+    }
+
+    private func saveReviews() {
+        let done = reviews.compactMapValues { if case .done(let r) = $0 { r } else { nil } }
+        try? JSONEncoder().encode(done).write(to: reviewsFile)
+    }
+
     func rerunReview(_ pr: PR) {
         reviews[pr.reviewKey] = .queued
         pumpReviews()
@@ -176,8 +222,7 @@ final class Store {
         Task {
             do {
                 reviews[pr.reviewKey] = .done(try await codexReview(pr))
-                let done = reviews.compactMapValues { if case .done(let r) = $0 { r } else { nil } }
-                try? JSONEncoder().encode(done).write(to: reviewsFile)
+                saveReviews()
             } catch {
                 reviews[pr.reviewKey] = .failed(error.localizedDescription)
             }

@@ -47,6 +47,7 @@ struct ContentView: View {
             Divider()
             if let pr = selected {
                 PRDetail(pr: pr, isMine: store.mine.contains { $0.id == pr.id })
+                    .id(pr.id)
             } else {
                 Text("Select a PR").foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -57,7 +58,10 @@ struct ContentView: View {
 
     private var footer: some View {
         HStack {
-            if let error = store.error {
+            if store.refreshing {
+                ProgressView().controlSize(.mini)
+                Text("Refreshing…").foregroundStyle(.secondary)
+            } else if let error = store.error {
                 Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red).lineLimit(2)
             } else if let at = store.updatedAt {
                 Text("Updated \(at, style: .relative) ago").foregroundStyle(.secondary)
@@ -65,6 +69,7 @@ struct ContentView: View {
             Spacer()
             Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                 .keyboardShortcut("r")
+                .disabled(store.refreshing)
             Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }
         }
         .font(.caption)
@@ -135,6 +140,7 @@ struct PRDetail: View {
     let pr: PR
     let isMine: Bool
     @State private var working = false
+    @State private var confirmPost = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -234,6 +240,26 @@ struct PRDetail: View {
             }
             .font(.callout.weight(.medium))
             if case .done(let r) = state {
+                if let at = r.postedAt {
+                    Label("Posted to the PR as changes requested \(at.formatted(.relative(presentation: .named)))",
+                          systemImage: "paperplane.fill")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else if !r.items.isEmpty {
+                    // Two-step: posting notifies the author, so one stray click shouldn't do it.
+                    Button(confirmPost ? "Click again to post as changes requested" : "Post findings to PR") {
+                        if confirmPost {
+                            working = true
+                            Task {
+                                await store.postFindings(pr, r)
+                                working = false
+                                confirmPost = false
+                            }
+                        } else {
+                            confirmPost = true
+                        }
+                    }
+                    .disabled(working)
+                }
                 Text(r.summary).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                 ForEach(Array(r.items.enumerated()), id: \.offset) { _, item in
                     VStack(alignment: .leading, spacing: 2) {
