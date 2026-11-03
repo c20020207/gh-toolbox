@@ -171,6 +171,12 @@ final class Store {
         }
     }
 
+    /// What is waiting on me: review requests Codex has finished, and my non-draft PRs with green CI but no reviewer.
+    var attention: Int {
+        requested.filter { if case .done = reviews[$0.reviewKey] { true } else { false } }.count
+            + mine.filter { !$0.isDraft && $0.ciState == "SUCCESS" && $0.reviewers.isEmpty }.count
+    }
+
     func refresh() async {
         refreshing = true
         defer { refreshing = false }

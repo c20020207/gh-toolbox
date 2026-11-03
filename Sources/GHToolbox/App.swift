@@ -11,7 +11,7 @@ struct GHToolboxApp: App {
         } label: {
             HStack {
                 Image(systemName: "arrow.triangle.pull")
-                if !store.requested.isEmpty { Text("\(store.requested.count)") }
+                if store.attention > 0 { Text("\(store.attention)") }
             }
         }
         .menuBarExtraStyle(.window)
