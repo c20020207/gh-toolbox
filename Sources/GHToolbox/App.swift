@@ -217,6 +217,7 @@ struct PRDetail: View {
                 Button(pr.isDraft ? "Ready for review" : "Convert to draft") {
                     perform(["pr", "ready", pr.url.absoluteString] + (pr.isDraft ? [] : ["--undo"]))
                 }
+                requestReview
                 Button("Close PR", role: .destructive) { perform(["pr", "close", pr.url.absoluteString], hiding: true) }
             } else {
                 Button("Approve") { perform(["pr", "review", pr.url.absoluteString, "--approve"], hiding: true) }
@@ -225,6 +226,22 @@ struct PRDetail: View {
             if working { ProgressView().controlSize(.small) }
         }
         .disabled(working)
+    }
+
+    private var requestReview: some View {
+        let candidates = pr.reviewerCandidates
+        return Menu("Request review") {
+            Section("Suggested") { ForEach(candidates.suggested, id: \.login, content: reviewerButton) }
+            Section("Everyone") { ForEach(candidates.others, id: \.login, content: reviewerButton) }
+        }
+        .fixedSize()
+    }
+
+    private func reviewerButton(_ user: PR.User) -> some View {
+        Button(user.name.map { "\($0) (\(user.login))" } ?? user.login) {
+            perform(["api", "--method", "POST", "repos/\(pr.repository.nameWithOwner)/pulls/\(pr.number)/requested_reviewers",
+                     "-f", "reviewers[]=\(user.login)"])
+        }
     }
 
     @ViewBuilder

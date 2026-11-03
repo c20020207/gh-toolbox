@@ -17,6 +17,7 @@ struct PR: Decodable, Identifiable {
     let commits: Commits
     let reviewRequests: Nodes<ReviewRequest>
     let latestReviews: Nodes<LatestReview>
+    let suggestedReviewers: [Suggestion]
 
     struct Nodes<T: Decodable>: Decodable { let nodes: [T] }
     struct ReviewRequest: Decodable { let requestedReviewer: Reviewer? }
@@ -24,7 +25,9 @@ struct PR: Decodable, Identifiable {
     struct Reviewer: Decodable { let login: String?, name: String? }
     struct LatestReview: Decodable { let author: Login?, state: String }
     struct Login: Decodable { let login: String }
-    struct Repo: Decodable { let nameWithOwner: String }
+    struct User: Decodable { let login: String, name: String? }
+    struct Suggestion: Decodable { let reviewer: Login }
+    struct Repo: Decodable { let nameWithOwner: String; let assignableUsers: Nodes<User> }
     struct Commits: Decodable { let nodes: [Node] }
     struct Node: Decodable { let commit: Commit }
     struct Commit: Decodable { let statusCheckRollup: Rollup? }
@@ -41,6 +44,14 @@ struct PR: Decodable, Identifiable {
             r.author.map { (name: $0.login, state: r.state) }
         }.filter { !waiting.contains($0.name) && $0.state != "PENDING" }
         return waiting.map { (name: $0, state: "WAITING") } + reviewed
+    }
+    /// Everyone who can review apart from the author and those already waiting, GitHub's suggestions first.
+    /// Someone who already reviewed stays in, so picking them re-requests.
+    var reviewerCandidates: (suggested: [User], others: [User]) {
+        let waiting = Set(reviewRequests.nodes.compactMap { $0.requestedReviewer?.login })
+        let suggested = Set(suggestedReviewers.map(\.reviewer.login))
+        let users = repository.assignableUsers.nodes.filter { $0.login != authorLogin && !waiting.contains($0.login) }
+        return (users.filter { suggested.contains($0.login) }, users.filter { !suggested.contains($0.login) })
     }
     var reviewKey: String { "\(id)@\(headRefOid)" }
     var checks: [Check] { commits.nodes.first?.commit.statusCheckRollup?.contexts.nodes ?? [] }
@@ -73,7 +84,8 @@ query {
 fragment pr on PullRequest {
   id number title url isDraft createdAt headRefOid baseRefName reviewDecision bodyHTML
   author { login }
-  repository { nameWithOwner }
+  repository { nameWithOwner assignableUsers(first: 100) { nodes { login name } } }
+  suggestedReviewers { reviewer { login } }
   reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
   latestReviews(first: 20) { nodes { author { login } state } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state
