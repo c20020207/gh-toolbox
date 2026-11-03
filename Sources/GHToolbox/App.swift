@@ -157,6 +157,7 @@ struct PRDetail: View {
                 default: EmptyView()
                 }
             }
+            reviewerTags
             checks
             actions
             if !isMine { codexReview }
@@ -164,6 +165,23 @@ struct PRDetail: View {
             HTMLView(key: pr.id, html: pr.bodyHTML)
         }
         .padding(14)
+    }
+
+    private var reviewerTags: some View {
+        HStack(spacing: 6) {
+            Text("Reviewers").foregroundStyle(.secondary)
+            if pr.reviewers.isEmpty { Text("none yet").foregroundStyle(.tertiary) }
+            ForEach(pr.reviewers, id: \.name) { reviewer in
+                switch reviewer.state {
+                case "APPROVED": Tag(text: "\(reviewer.name) approved", color: .green)
+                case "CHANGES_REQUESTED": Tag(text: "\(reviewer.name) requested changes", color: .red)
+                case "WAITING": Tag(text: "\(reviewer.name) waiting", color: .orange)
+                case "DISMISSED": Tag(text: "\(reviewer.name) dismissed", color: .gray)
+                default: Tag(text: "\(reviewer.name) commented", color: .blue)
+                }
+            }
+        }
+        .font(.callout)
     }
 
     private var checks: some View {

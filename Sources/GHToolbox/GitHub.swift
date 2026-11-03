@@ -15,7 +15,14 @@ struct PR: Decodable, Identifiable {
     let author: Login?
     let repository: Repo
     let commits: Commits
+    let reviewRequests: Nodes<ReviewRequest>
+    let latestReviews: Nodes<LatestReview>
 
+    struct Nodes<T: Decodable>: Decodable { let nodes: [T] }
+    struct ReviewRequest: Decodable { let requestedReviewer: Reviewer? }
+    /// A User (login) or a Team (name).
+    struct Reviewer: Decodable { let login: String?, name: String? }
+    struct LatestReview: Decodable { let author: Login?, state: String }
     struct Login: Decodable { let login: String }
     struct Repo: Decodable { let nameWithOwner: String }
     struct Commits: Decodable { let nodes: [Node] }
@@ -27,6 +34,14 @@ struct PR: Decodable, Identifiable {
     var authorLogin: String { author?.login ?? "ghost" }
     var repoName: String { repository.nameWithOwner.split(separator: "/").last.map(String.init) ?? "" }
     var ciState: String? { commits.nodes.first?.commit.statusCheckRollup?.state }
+    /// Who is still asked to review, then everyone else's latest verdict. A re-requested reviewer counts as waiting.
+    var reviewers: [(name: String, state: String)] {
+        let waiting = reviewRequests.nodes.compactMap { $0.requestedReviewer.flatMap { $0.login ?? $0.name } }
+        let reviewed = latestReviews.nodes.compactMap { r in
+            r.author.map { (name: $0.login, state: r.state) }
+        }.filter { !waiting.contains($0.name) && $0.state != "PENDING" }
+        return waiting.map { (name: $0, state: "WAITING") } + reviewed
+    }
     var reviewKey: String { "\(id)@\(headRefOid)" }
     var checks: [Check] { commits.nodes.first?.commit.statusCheckRollup?.contexts.nodes ?? [] }
 }
@@ -59,6 +74,8 @@ fragment pr on PullRequest {
   id number title url isDraft createdAt headRefOid baseRefName reviewDecision bodyHTML
   author { login }
   repository { nameWithOwner }
+  reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+  latestReviews(first: 20) { nodes { author { login } state } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state
     contexts(first: 100) { nodes {
       ... on CheckRun { name conclusion status detailsUrl }
