@@ -199,9 +199,9 @@ struct PRDetail: View {
                 Button(pr.isDraft ? "Ready for review" : "Convert to draft") {
                     perform(["pr", "ready", pr.url.absoluteString] + (pr.isDraft ? [] : ["--undo"]))
                 }
-                Button("Close PR", role: .destructive) { perform(["pr", "close", pr.url.absoluteString]) }
+                Button("Close PR", role: .destructive) { perform(["pr", "close", pr.url.absoluteString], hiding: true) }
             } else {
-                Button("Approve") { perform(["pr", "review", pr.url.absoluteString, "--approve"]) }
+                Button("Approve") { perform(["pr", "review", pr.url.absoluteString, "--approve"], hiding: true) }
                     .buttonStyle(.borderedProminent)
             }
             if working { ProgressView().controlSize(.small) }
@@ -279,10 +279,10 @@ struct PRDetail: View {
         URL(string: "https://github.com/\(pr.repository.nameWithOwner)/blob/\(pr.headRefOid)/\(item.file.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? item.file)#L\(item.line)")!
     }
 
-    private func perform(_ args: [String]) {
+    private func perform(_ args: [String], hiding: Bool = false) {
         working = true
         Task {
-            await store.run(args)
+            await store.run(args, hiding: hiding ? pr : nil)
             working = false
         }
     }

@@ -121,6 +121,9 @@ final class Store {
     var error: String?
     var updatedAt: Date?
     var refreshing = false
+    /// PRs just closed, approved or reviewed. Search results lag a minute or so behind and would bring them back.
+    // ponytail: fixed 10-minute window, check reviewRequests per PR if a quick re-request ever gets hidden
+    private var hidden: [String: Date] = [:]
     var reviews: [String: ReviewState] = [:]
     private var reviewing = false
     private let reviewsFile = appSupport.appendingPathComponent("reviews.json")
@@ -147,9 +150,11 @@ final class Store {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let lists = try decoder.decode(Response.self, from: data).data
-            mine = lists.mine.nodes
+            hidden = hidden.filter { $0.value > .now.addingTimeInterval(-600) }
+            mine = lists.mine.nodes.filter { hidden[$0.id] == nil }
             var seen = Set<String>()
-            requested = (lists.requested.nodes + lists.dismissed.nodes).filter { seen.insert($0.id).inserted }
+            requested = (lists.requested.nodes + lists.dismissed.nodes)
+                .filter { hidden[$0.id] == nil && seen.insert($0.id).inserted }
             error = nil
             updatedAt = .now
             for pr in requested where reviews[pr.reviewKey] == nil { reviews[pr.reviewKey] = .queued }
@@ -159,9 +164,20 @@ final class Store {
         }
     }
 
-    func run(_ args: [String]) async {
-        do { _ = try await cli(["gh"] + args) } catch { self.error = error.localizedDescription }
+    func run(_ args: [String], hiding pr: PR? = nil) async {
+        do {
+            _ = try await cli(["gh"] + args)
+            if let pr { hide(pr) }
+        } catch {
+            self.error = error.localizedDescription
+        }
         await refresh()
+    }
+
+    private func hide(_ pr: PR) {
+        hidden[pr.id] = .now
+        mine.removeAll { $0.id == pr.id }
+        requested.removeAll { $0.id == pr.id }
     }
 
     /// Submits the findings as a "changes requested" review. GitHub then drops the PR from the review-requested
@@ -189,6 +205,7 @@ final class Store {
             posted.postedAt = .now
             reviews[pr.reviewKey] = .done(posted)
             saveReviews()
+            hide(pr)
         } catch {
             self.error = error.localizedDescription
         }
