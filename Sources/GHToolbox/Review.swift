@@ -1,10 +1,23 @@
 import Foundation
 
+enum ReviewEngine: String, CaseIterable, Identifiable {
+    case codex, claude
+    var id: String { rawValue }
+    var name: String { self == .codex ? "Codex" : "Claude" }
+
+    static var selected: ReviewEngine {
+        ReviewEngine(rawValue: UserDefaults.standard.string(forKey: "reviewEngine") ?? "") ?? .codex
+    }
+}
+
 struct Review: Codable {
     let verdict: String
     let summary: String
     let items: [Item]
     var postedAt: Date?
+    var engine: ReviewEngine.RawValue?
+
+    var engineName: String { engine.flatMap(ReviewEngine.init).map(\.name) ?? "Codex" }
 
     struct Item: Codable {
         let file: String
@@ -30,9 +43,10 @@ private let schema = """
    "properties":{"file":{"type":"string"},"line":{"type":"integer"},"why":{"type":"string"}}}}}}
 """
 
-/// Checks the PR head out into a throwaway worktree of a blobless clone the app owns, then asks Codex
-/// (read-only sandbox) for a structured verdict.
-func codexReview(_ pr: PR) async throws -> Review {
+/// Checks the PR head out into a throwaway worktree of a blobless clone the app owns, then asks the selected
+/// engine (Codex in a read-only sandbox, or Claude Code limited to read-only tools) for a structured verdict.
+func reviewPR(_ pr: PR) async throws -> Review {
+    let engine = ReviewEngine.selected
     let repo = appSupport.appendingPathComponent("repos/\(pr.repository.nameWithOwner)")
     if !FileManager.default.fileExists(atPath: repo.appendingPathComponent(".git").path) {
         try FileManager.default.createDirectory(at: repo.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -67,7 +81,32 @@ func codexReview(_ pr: PR) async throws -> Review {
     otherwise "look" with one item per concern: file (repo-relative path), line (in the new version) and a one \
     or two sentence why. summary is one sentence on what the PR does.
     """
-    _ = try await cli(["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral",
-                       "--output-schema", schemaFile.path, "-o", out.path, "-C", work.path, prompt])
-    return try JSONDecoder().decode(Review.self, from: Data(contentsOf: out))
+    var review: Review
+    switch engine {
+    case .codex:
+        _ = try await cli(["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral",
+                           "--output-schema", schemaFile.path, "-o", out.path, "-C", work.path, prompt])
+        review = try JSONDecoder().decode(Review.self, from: Data(contentsOf: out))
+    case .claude:
+        // The prompt goes first: --allowedTools is variadic and would swallow it.
+        let data = try await cli(["claude", "-p", prompt, "--output-format", "json", "--json-schema", schema,
+                                  "--no-session-persistence", "--allowedTools",
+                                  "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob"],
+                                 cwd: work)
+        let envelope = try JSONDecoder().decode(ClaudeResult.self, from: data)
+        if envelope.is_error { throw GHError(errorDescription: envelope.result ?? "claude failed") }
+        guard let structured = envelope.structured_output else {
+            throw GHError(errorDescription: "claude returned no structured output")
+        }
+        review = structured
+    }
+    review.engine = engine.rawValue
+    return review
 }
+
+private struct ClaudeResult: Decodable {
+    let is_error: Bool
+    let result: String?
+    let structured_output: Review?
+}
+

@@ -106,15 +106,18 @@ struct GHError: LocalizedError {
     let errorDescription: String?
 }
 
-/// Runs a CLI off the main thread. A GUI app doesn't get the login shell's PATH, so Homebrew's bin is added.
-func cli(_ args: [String]) async throws -> Data {
+/// Runs a CLI off the main thread. A GUI app doesn't get the login shell's PATH, so Homebrew's bin and
+/// ~/.local/bin (the claude installer) are added.
+func cli(_ args: [String], cwd: URL? = nil) async throws -> Data {
     try await withCheckedThrowingContinuation { cont in
         DispatchQueue.global().async {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             p.arguments = args
+            p.currentDirectoryURL = cwd
             var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(home)/.local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
             p.environment = env
             let out = Pipe(), err = Pipe()
             p.standardOutput = out
@@ -136,7 +139,9 @@ func cli(_ args: [String]) async throws -> Data {
             if p.terminationStatus == 0 {
                 cont.resume(returning: data)
             } else {
-                let msg = String(data: errData.suffix(600), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                // claude reports failures as JSON on stdout with an empty stderr.
+                let tail = errData.isEmpty ? data : errData
+                let msg = String(data: tail.suffix(600), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
                 cont.resume(throwing: GHError(errorDescription: msg ?? "\(args[0]) exited \(p.terminationStatus)"))
             }
         }
@@ -171,7 +176,7 @@ final class Store {
         }
     }
 
-    /// What is waiting on me: review requests Codex has finished, and my non-draft PRs with green CI but no reviewer.
+    /// What is waiting on me: review requests the reviewer has finished, and my non-draft PRs with green CI but no reviewer.
     var attention: Int {
         requested.filter { if case .done = reviews[$0.reviewKey] { true } else { false } }.count
             + mine.filter { !$0.isDraft && $0.ciState == "SUCCESS" && $0.reviewers.isEmpty }.count
@@ -216,7 +221,7 @@ final class Store {
     }
 
     /// Submits the findings as a "changes requested" review. GitHub then drops the PR from the review-requested
-    /// list; when the author re-requests, the new head SHA gets a fresh Codex run.
+    /// list; when the author re-requests, the new head SHA gets a fresh review run.
     func postFindings(_ pr: PR, _ review: Review) async {
         let inline: [String: Any] = [
             "commit_id": pr.headRefOid,
@@ -264,7 +269,7 @@ final class Store {
         pumpReviews()
     }
 
-    /// One review at a time: each is a multi-minute Codex run over a full checkout.
+    /// One review at a time: each is a multi-minute agent run over a full checkout.
     private func pumpReviews() {
         guard !reviewing, let pr = requested.first(where: {
             if case .queued = reviews[$0.reviewKey] { true } else { false }
@@ -273,7 +278,7 @@ final class Store {
         reviews[pr.reviewKey] = .running
         Task {
             do {
-                reviews[pr.reviewKey] = .done(try await codexReview(pr))
+                reviews[pr.reviewKey] = .done(try await reviewPR(pr))
                 saveReviews()
             } catch {
                 reviews[pr.reviewKey] = .failed(error.localizedDescription)

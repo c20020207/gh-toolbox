@@ -21,6 +21,7 @@ struct GHToolboxApp: App {
 struct ContentView: View {
     @Environment(Store.self) private var store
     @State private var selection: String?
+    @AppStorage("reviewEngine") private var engine = ReviewEngine.codex
 
     private var selected: PR? {
         (store.requested + store.mine).first { $0.id == selection }
@@ -67,6 +68,14 @@ struct ContentView: View {
                 Text("Updated \(at, style: .relative) ago").foregroundStyle(.secondary)
             }
             Spacer()
+            Menu {
+                Picker("Review with", selection: $engine) {
+                    ForEach(ReviewEngine.allCases) { Text($0.name).tag($0) }
+                }
+                .pickerStyle(.inline)
+            } label: { Image(systemName: "gearshape") }
+                .menuIndicator(.hidden)
+                .fixedSize()
             Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                 .keyboardShortcut("r")
                 .disabled(store.refreshing)
@@ -168,7 +177,7 @@ struct PRDetail: View {
             reviewerTags
             checks
             actions
-            if !isMine { codexReview }
+            if !isMine { agentReview }
             Divider()
             HTMLView(key: pr.id, html: pr.bodyHTML)
         }
@@ -253,23 +262,23 @@ struct PRDetail: View {
     }
 
     @ViewBuilder
-    private var codexReview: some View {
+    private var agentReview: some View {
         let state = store.reviews[pr.reviewKey]
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 switch state {
                 case .queued, nil:
                     Image(systemName: "clock").foregroundStyle(.secondary)
-                    Text("Codex review queued")
+                    Text("\(ReviewEngine.selected.name) review queued")
                 case .running:
                     ProgressView().controlSize(.small)
-                    Text("Codex is reviewing, usually a few minutes")
+                    Text("\(ReviewEngine.selected.name) is reviewing, usually a few minutes")
                 case .done(let r) where r.verdict == "ok":
                     Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
-                    Text("Codex found nothing that needs a closer look")
+                    Text("\(r.engineName) found nothing that needs a closer look")
                 case .done(let r):
                     Image(systemName: "exclamationmark.bubble.fill").foregroundStyle(.orange)
-                    Text("Codex flagged \(r.items.count) thing\(r.items.count == 1 ? "" : "s") to check")
+                    Text("\(r.engineName) flagged \(r.items.count) thing\(r.items.count == 1 ? "" : "s") to check")
                 case .failed(let message):
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
                     Text("Review failed: \(message)").lineLimit(2)
